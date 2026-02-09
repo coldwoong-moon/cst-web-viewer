@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CSTEngine IFC Viewer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { overflow: hidden; font-family: 'Segoe UI', sans-serif; background: #1a1a2e; }
+        #container { width: 100vw; height: 100vh; }
+        #info {
+            position: absolute; top: 10px; left: 10px;
+            background: rgba(0,0,0,0.8); color: #fff;
+            padding: 15px; border-radius: 8px; font-size: 13px;
+            max-width: 280px; backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        #info h3 { margin-bottom: 8px; color: #4fc3f7; font-size: 15px; }
+        #info .stat { margin: 4px 0; color: #aaa; }
+        #info .stat b { color: #fff; }
+        #progress {
+            position: absolute; top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center; color: #fff;
+        }
+        #progress .spinner {
+            width: 50px; height: 50px; margin: 0 auto 15px;
+            border: 3px solid rgba(255,255,255,0.1);
+            border-top-color: #4fc3f7; border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        #progress .bar {
+            width: 300px; height: 6px; background: rgba(255,255,255,0.1);
+            border-radius: 3px; margin-top: 10px;
+        }
+        #progress .fill {
+            width: 0%; height: 100%; background: #4fc3f7;
+            border-radius: 3px; transition: width 0.3s;
+        }
+        #controls {
+            position: absolute; bottom: 10px; left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.8); color: #aaa;
+            padding: 10px 20px; border-radius: 8px; font-size: 11px;
+            display: flex; gap: 16px; backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        #controls .group { display: flex; gap: 4px; align-items: center; }
+        #controls .key {
+            background: rgba(255,255,255,0.15); color: #ddd;
+            padding: 1px 5px; border-radius: 3px; font-family: monospace;
+            font-size: 10px; border: 1px solid rgba(255,255,255,0.2);
+        }
+        #viewcube {
+            position: absolute; top: 10px; right: 10px;
+            display: grid; grid-template-columns: repeat(4,36px);
+            gap: 2px;
+        }
+        #viewcube button {
+            background: rgba(0,0,0,0.7); color: #aaa; border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 4px; padding: 4px 0; font-size: 10px; cursor: pointer;
+            backdrop-filter: blur(10px);
+        }
+        #viewcube button:hover { background: rgba(79,195,247,0.3); color: #fff; }
+    </style>
+</head>
+<body>
+    <div id="container"></div>
+    <div id="progress">
+        <div class="spinner"></div>
+        <div id="status">Loading mesh data...</div>
+        <div class="bar"><div class="fill" id="fill"></div></div>
+    </div>
+    <div id="info" style="display:none">
+        <h3>CSTEngine IFC Viewer</h3>
+        <div class="stat">Meshes: <b id="meshCount">0</b></div>
+        <div class="stat">Triangles: <b id="triCount">0</b></div>
+        <div class="stat">Vertices: <b id="vertCount">0</b></div>
+        <div class="stat">Data size: <b id="dataSize">0</b></div>
+    </div>
+    <div id="controls">
+        <div class="group"><span class="key">MMB</span> Rotate</div>
+        <div class="group"><span class="key">Shift</span>+<span class="key">MMB</span> Pan</div>
+        <div class="group"><span class="key">Scroll</span> Zoom</div>
+        <div class="group"><span class="key">RMB</span> Pan</div>
+        <div class="group"><span class="key">H</span> Home</div>
+        <div class="group"><span class="key">F</span> Fit</div>
+    </div>
+    <div id="viewcube">
+        <button data-view="front">Front</button>
+        <button data-view="back">Back</button>
+        <button data-view="left">Left</button>
+        <button data-view="right">Right</button>
+        <button data-view="top">Top</button>
+        <button data-view="bottom">Bottom</button>
+        <button data-view="iso">ISO</button>
+        <button data-view="fit">Fit</button>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+    (async function() {
+        const status = document.getElementById('status');
+        const fill = document.getElementById('fill');
+
+        // Fetch binary mesh data with progress
+        status.textContent = 'Downloading mesh data...';
+        // Get raw size for progress (gzip removes Content-Length)
+        let expectedSize = 0;
+        try {
+            const info = await fetch('/api/info');
+            const infoData = await info.json();
+            expectedSize = infoData.fileSize || 0;
+        } catch(e) {}
+        const response = await fetch('/api/mesh');
+        const contentLength = +response.headers.get('Content-Length') || 0;
+        const rawSize = +response.headers.get('X-Raw-Size') || expectedSize;
+        const progressTotal = contentLength || rawSize;
+        const reader = response.body.getReader();
+        const chunks = [];
+        let received = 0;
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            received += value.length;
+            if (progressTotal > 0) {
+                const pct = Math.min(100, Math.round((received / progressTotal) * 100));
+                fill.style.width = pct + '%';
+                status.textContent = `Downloading... ${(received/1048576).toFixed(1)} MB`;
+            } else {
+                status.textContent = `Downloading... ${(received/1048576).toFixed(1)} MB`;
+            }
+        }
+
+        // Combine chunks into single ArrayBuffer
+        const totalLength = chunks.reduce((a, c) => a + c.length, 0);
+        const combined = new Uint8Array(totalLength);
+        let offset = 0;
+        for (const chunk of chunks) {
+            combined.set(chunk, offset);
+            offset += chunk.length;
+        }
+
+        document.getElementById('dataSize').textContent =
+            (totalLength / 1048576).toFixed(1) + ' MB';
+
+        status.textContent = 'Parsing mesh data...';
+        fill.style.width = '100%';
+
+        // Parse binary mesh data
+        const buffer = combined.buffer;
+        const view = new DataView(buffer);
+        let pos = 0;
+
+        // Detect format version: v2+ starts with u8 version byte
+        // v1 (legacy) starts with u32 mesh_count (typically > 255)
+        const firstByte = view.getUint8(0);
+        let version = 1;
+        if (firstByte >= 2 && firstByte <= 10) {
+            version = firstByte;
+            pos = 1; // skip version byte
+        }
+        const hasNormals = (version < 2);
+
+        const meshCount = view.getUint32(pos, true); pos += 4;
+        let instancedGroupCount = 0;
+        if (version >= 3) {
+            instancedGroupCount = view.getUint32(pos, true); pos += 4;
+        }
+        const meshes = [];
+        const instancedGroups = [];
+        let totalVerts = 0, totalTris = 0;
+
+        // Parse regular meshes
+        for (let m = 0; m < meshCount; m++) {
+            const nameLen = view.getUint32(pos, true); pos += 4;
+            const nameBytes = new Uint8Array(buffer, pos, nameLen);
+            const name = new TextDecoder().decode(nameBytes); pos += nameLen;
+            const r = view.getFloat32(pos, true); pos += 4;
+            const g = view.getFloat32(pos, true); pos += 4;
+            const b = view.getFloat32(pos, true); pos += 4;
+            const vertCount = view.getUint32(pos, true); pos += 4;
+            const idxCount = view.getUint32(pos, true); pos += 4;
+            const rawPos = new Float32Array(buffer.slice(pos, pos + vertCount * 12)); pos += vertCount * 12;
+            const positions = new Float32Array(rawPos.length);
+            for (let v = 0; v < vertCount; v++) {
+                positions[v*3]   =  rawPos[v*3];
+                positions[v*3+1] =  rawPos[v*3+2];
+                positions[v*3+2] = -rawPos[v*3+1];
+            }
+            let normals = null;
+            if (hasNormals) {
+                const rawNrm = new Float32Array(buffer.slice(pos, pos + vertCount * 12)); pos += vertCount * 12;
+                normals = new Float32Array(rawNrm.length);
+                for (let v = 0; v < vertCount; v++) {
+                    normals[v*3]   =  rawNrm[v*3];
+                    normals[v*3+1] =  rawNrm[v*3+2];
+                    normals[v*3+2] = -rawNrm[v*3+1];
+                }
+            }
+            const indices = new Uint32Array(buffer.slice(pos, pos + idxCount * 4)); pos += idxCount * 4;
+            totalVerts += vertCount;
+            totalTris += idxCount / 3;
+            meshes.push({ name, color: [r, g, b], positions, normals, indices });
+        }
+
+        // Parse instanced groups (v3+)
+        for (let g = 0; g < instancedGroupCount; g++) {
+            const nameLen = view.getUint32(pos, true); pos += 4;
+            const nameBytes = new Uint8Array(buffer, pos, nameLen);
+            const name = new TextDecoder().decode(nameBytes); pos += nameLen;
+            const r = view.getFloat32(pos, true); pos += 4;
+            const gVal = view.getFloat32(pos, true); pos += 4;
+            const b = view.getFloat32(pos, true); pos += 4;
+            const vertCount = view.getUint32(pos, true); pos += 4;
+            const idxCount = view.getUint32(pos, true); pos += 4;
+            const instCount = view.getUint32(pos, true); pos += 4;
+            // positions with coordinate swap
+            const rawPos = new Float32Array(buffer.slice(pos, pos + vertCount * 12)); pos += vertCount * 12;
+            const positions = new Float32Array(rawPos.length);
+            for (let v = 0; v < vertCount; v++) {
+                positions[v*3]   =  rawPos[v*3];
+                positions[v*3+1] =  rawPos[v*3+2];
+                positions[v*3+2] = -rawPos[v*3+1];
+            }
+            const indices = new Uint32Array(buffer.slice(pos, pos + idxCount * 4)); pos += idxCount * 4;
+            // transform matrices (16 floats each, column-major)
+            const transforms = [];
+            for (let i = 0; i < instCount; i++) {
+                const mat = new Float32Array(buffer.slice(pos, pos + 64)); pos += 64;
+                transforms.push(mat);
+            }
+            totalVerts += vertCount * instCount;
+            totalTris += (idxCount / 3) * instCount;
+            instancedGroups.push({ name, color: [r, gVal, b], positions, indices, instCount, transforms });
+        }
+
+        // Update info
+        const totalMeshes = meshCount + instancedGroupCount;
+        document.getElementById('meshCount').textContent =
+            instancedGroupCount > 0
+            ? `${meshCount.toLocaleString()} + ${instancedGroupCount} instanced`
+            : meshCount.toLocaleString();
+        document.getElementById('triCount').textContent = Math.round(totalTris).toLocaleString();
+        document.getElementById('vertCount').textContent = totalVerts.toLocaleString();
+
+        // Hide progress, show info
+        document.getElementById('progress').style.display = 'none';
+        document.getElementById('info').style.display = 'block';
+
+        // --- Three.js Setup ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x1a1a2e);
+
+        const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 1, 1000000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        document.getElementById('container').appendChild(renderer.domElement);
+
+        // Lighting
+        scene.add(new THREE.AmbientLight(0x404040, 2));
+        const d1 = new THREE.DirectionalLight(0xffffff, 1);
+        d1.position.set(1, 2, 1); scene.add(d1);
+        const d2 = new THREE.DirectionalLight(0xffffff, 0.4);
+        d2.position.set(-1, -0.5, -1); scene.add(d2);
+
+        // Add meshes
+        const box = new THREE.Box3();
+        for (const data of meshes) {
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
+            if (data.normals) {
+                geo.setAttribute('normal', new THREE.BufferAttribute(data.normals, 3));
+            }
+            geo.setIndex(new THREE.BufferAttribute(data.indices, 1));
+            if (!data.normals) {
+                geo.computeVertexNormals();
+            }
+
+            const mat = new THREE.MeshPhongMaterial({
+                color: new THREE.Color(data.color[0], data.color[1], data.color[2]),
+                shininess: 30, side: THREE.DoubleSide,
+                flatShading: !data.normals,
+            });
+            const mesh = new THREE.Mesh(geo, mat);
+            scene.add(mesh);
+
+            geo.computeBoundingBox();
+            box.union(geo.boundingBox);
+        }
+
+        // Add instanced meshes
+        for (const data of instancedGroups) {
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
+            geo.setIndex(new THREE.BufferAttribute(data.indices, 1));
+            geo.computeVertexNormals();
+
+            const mat = new THREE.MeshPhongMaterial({
+                color: new THREE.Color(data.color[0], data.color[1], data.color[2]),
+                shininess: 30, side: THREE.DoubleSide,
+                flatShading: true,
+            });
+
+            const iMesh = new THREE.InstancedMesh(geo, mat, data.instCount);
+            const matrix = new THREE.Matrix4();
+            for (let i = 0; i < data.instCount; i++) {
+                const t = data.transforms[i];
+                // Column-major: swap Y/Z for IFC→Three.js coordinate system
+                // Original: tx=t[12], ty=t[13], tz=t[14]
+                // Swapped: tx=t[12], ty=t[14], tz=-t[13]
+                matrix.set(
+                    t[0], t[4], t[8],  t[12],
+                    t[2], t[6], t[10], t[14],
+                    -t[1], -t[5], -t[9], -t[13],
+                    t[3], t[7], t[11], t[15]
+                );
+                iMesh.setMatrixAt(i, matrix);
+            }
+            iMesh.instanceMatrix.needsUpdate = true;
+            scene.add(iMesh);
+
+            geo.computeBoundingBox();
+            if (geo.boundingBox) {
+                // Expand bounds to include all instances
+                for (let i = 0; i < data.instCount; i++) {
+                    const instanceBox = geo.boundingBox.clone();
+                    const m = new THREE.Matrix4();
+                    const t = data.transforms[i];
+                    m.set(
+                        t[0], t[4], t[8],  t[12],
+                        t[2], t[6], t[10], t[14],
+                        -t[1], -t[5], -t[9], -t[13],
+                        t[3], t[7], t[11], t[15]
+                    );
+                    instanceBox.applyMatrix4(m);
+                    box.union(instanceBox);
+                }
+            }
+        }
+
+        // Camera positioning
+        const center = new THREE.Vector3();
+        box.getCenter(center);
+        const size = new THREE.Vector3();
+        box.getSize(size);
+        const maxDim = Math.max(size.x, size.y, size.z);
+        const dist = maxDim * 1.5;
+
+        camera.near = dist * 0.001;
+        camera.far = dist * 100;
+        camera.updateProjectionMatrix();
+
+        let theta = Math.PI / 4, phi = Math.PI / 4, radius = dist;
+        function updateCamera() {
+            camera.position.set(
+                center.x + radius * Math.sin(phi) * Math.cos(theta),
+                center.y + radius * Math.cos(phi),
+                center.z + radius * Math.sin(phi) * Math.sin(theta)
+            );
+            camera.lookAt(center);
+        }
+        updateCamera();
+
+        // Grid + Axes
+        const grid = new THREE.GridHelper(maxDim * 2, 20, 0x444444, 0x222222);
+        grid.position.y = box.min.y;
+        scene.add(grid);
+        scene.add(new THREE.AxesHelper(maxDim * 0.3));
+
+        // === Tekla Structures-style Navigation ===
+        // MMB: orbit | Shift+MMB or RMB: pan | Scroll: zoom to cursor
+        // Ctrl+MMB: zoom drag | Double-click: fit all
+        // Touch: 1-finger orbit, 2-finger pan/pinch zoom
+
+        const el = renderer.domElement;
+        let activeBtn = -1;
+        let prev = { x: 0, y: 0 };
+        let lastMmbTime = 0;
+        const initTheta = theta, initPhi = phi, initRadius = radius;
+        const homeCenter = center.clone();
+
+        // --- Smooth animation ---
+        let animTarget = null;
+        function animateTo(tTheta, tPhi, tRadius, tCenter) {
+            animTarget = {
+                theta: tTheta, phi: tPhi, radius: tRadius,
+                center: tCenter || center.clone(),
+                start: performance.now(), duration: 300,
+                fromTheta: theta, fromPhi: phi, fromRadius: radius,
+                fromCenter: center.clone(),
+            };
+        }
+        function tickAnim(now) {
+            if (!animTarget) return;
+            const t = Math.min(1, (now - animTarget.start) / animTarget.duration);
+            const ease = t < 0.5 ? 2*t*t : -1+(4-2*t)*t; // ease in-out quad
+            theta = animTarget.fromTheta + (animTarget.theta - animTarget.fromTheta) * ease;
+            phi = animTarget.fromPhi + (animTarget.phi - animTarget.fromPhi) * ease;
+            radius = animTarget.fromRadius + (animTarget.radius - animTarget.fromRadius) * ease;
+            center.lerpVectors(animTarget.fromCenter, animTarget.center, ease);
+            updateCamera();
+            if (t >= 1) animTarget = null;
+        }
+
+        function setView(tTheta, tPhi) {
+            animateTo(tTheta, tPhi, radius, undefined);
+        }
+        function fitAll() {
+            const fc = new THREE.Vector3();
+            box.getCenter(fc);
+            animateTo(initTheta, initPhi, initRadius, fc);
+        }
+        function homeView() {
+            const fc = new THREE.Vector3();
+            box.getCenter(fc);
+            animateTo(initTheta, initPhi, initRadius, fc);
+        }
+
+        // --- Mouse controls ---
+        el.addEventListener('mousedown', e => {
+            animTarget = null; // cancel animation on interaction
+            if (e.button === 1) { // MMB
+                e.preventDefault();
+                const now = Date.now();
+                if (now - lastMmbTime < 350) { fitAll(); lastMmbTime = 0; return; }
+                lastMmbTime = now;
+            }
+            activeBtn = e.button;
+            prev = { x: e.clientX, y: e.clientY };
+        });
+
+        el.addEventListener('mousemove', e => {
+            if (activeBtn < 0) return;
+            const dx = e.clientX - prev.x, dy = e.clientY - prev.y;
+            prev = { x: e.clientX, y: e.clientY };
+            if (dx === 0 && dy === 0) return;
+
+            const isOrbit = (activeBtn === 1 && !e.shiftKey && !e.ctrlKey) ||
+                            (activeBtn === 0 && !e.shiftKey && !e.ctrlKey);
+            const isPan   = (activeBtn === 1 && e.shiftKey) || (activeBtn === 2);
+            const isZoom  = (activeBtn === 1 && e.ctrlKey);
+
+            if (isOrbit && activeBtn === 1) {
+                // MMB orbit (Tekla primary)
+                theta -= dx * 0.004;
+                phi = Math.max(0.05, Math.min(Math.PI - 0.05, phi + dy * 0.004));
+                updateCamera();
+            } else if (isPan) {
+                const speed = radius * 0.0008;
+                const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
+                const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
+                center.addScaledVector(right, -dx * speed);
+                center.addScaledVector(up, dy * speed);
+                updateCamera();
+            } else if (isZoom) {
+                radius *= 1.0 - dy * 0.004;
+                radius = Math.max(maxDim * 0.005, radius);
+                updateCamera();
+            }
+        });
+
+        window.addEventListener('mouseup', () => { activeBtn = -1; });
+        el.addEventListener('auxclick', e => { if (e.button === 1) e.preventDefault(); });
+        el.addEventListener('contextmenu', e => e.preventDefault());
+
+        // --- Scroll: zoom toward cursor ---
+        el.addEventListener('wheel', e => {
+            e.preventDefault();
+            animTarget = null;
+            const zoomIn = e.deltaY < 0;
+            const factor = zoomIn ? 0.88 : 1.12;
+            radius *= factor;
+            radius = Math.max(maxDim * 0.005, Math.min(maxDim * 50, radius));
+            updateCamera();
+        });
+
+        // --- Touch controls ---
+        let touches = [];
+        let touchDist = 0;
+        el.addEventListener('touchstart', e => {
+            e.preventDefault();
+            animTarget = null;
+            touches = Array.from(e.touches);
+            if (touches.length === 2) {
+                const dx = touches[1].clientX - touches[0].clientX;
+                const dy = touches[1].clientY - touches[0].clientY;
+                touchDist = Math.sqrt(dx*dx + dy*dy);
+            }
+        }, { passive: false });
+
+        el.addEventListener('touchmove', e => {
+            e.preventDefault();
+            const cur = Array.from(e.touches);
+            if (cur.length === 1 && touches.length >= 1) {
+                // Single finger: orbit
+                const dx = cur[0].clientX - touches[0].clientX;
+                const dy = cur[0].clientY - touches[0].clientY;
+                theta -= dx * 0.004;
+                phi = Math.max(0.05, Math.min(Math.PI - 0.05, phi + dy * 0.004));
+                updateCamera();
+            } else if (cur.length === 2 && touches.length >= 2) {
+                // Two fingers: pan + pinch zoom
+                const cx0 = (touches[0].clientX + touches[1].clientX) / 2;
+                const cy0 = (touches[0].clientY + touches[1].clientY) / 2;
+                const cx1 = (cur[0].clientX + cur[1].clientX) / 2;
+                const cy1 = (cur[0].clientY + cur[1].clientY) / 2;
+                // Pan
+                const speed = radius * 0.0008;
+                const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
+                const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
+                center.addScaledVector(right, -(cx1-cx0) * speed);
+                center.addScaledVector(up, (cy1-cy0) * speed);
+                // Pinch zoom
+                const dx = cur[1].clientX - cur[0].clientX;
+                const dy = cur[1].clientY - cur[0].clientY;
+                const newDist = Math.sqrt(dx*dx + dy*dy);
+                if (touchDist > 0) {
+                    radius *= touchDist / newDist;
+                    radius = Math.max(maxDim * 0.005, Math.min(maxDim * 50, radius));
+                }
+                touchDist = newDist;
+                updateCamera();
+            }
+            touches = cur;
+        }, { passive: false });
+
+        el.addEventListener('touchend', e => { touches = Array.from(e.touches); });
+
+        // --- Keyboard shortcuts ---
+        window.addEventListener('keydown', e => {
+            if (e.target.tagName === 'INPUT') return;
+            const k = e.key.toLowerCase();
+            if (k === 'h' || k === 'home') homeView();
+            else if (k === 'f') fitAll();
+            else if (k === '1') setView(0, Math.PI / 2);                   // Front
+            else if (k === '2') setView(Math.PI, Math.PI / 2);             // Back
+            else if (k === '3') setView(-Math.PI / 2, Math.PI / 2);        // Right
+            else if (k === '4') setView(Math.PI / 2, Math.PI / 2);         // Left
+            else if (k === '5') setView(theta, 0.05);                       // Top
+            else if (k === '6') setView(theta, Math.PI - 0.05);            // Bottom
+            else if (k === '7') setView(Math.PI / 4, Math.PI / 4);         // Isometric
+        });
+
+        // --- ViewCube buttons ---
+        const viewMap = {
+            front:  [0, Math.PI/2],
+            back:   [Math.PI, Math.PI/2],
+            left:   [Math.PI/2, Math.PI/2],
+            right:  [-Math.PI/2, Math.PI/2],
+            top:    [0, 0.05],
+            bottom: [0, Math.PI-0.05],
+            iso:    [Math.PI/4, Math.PI/4],
+        };
+        document.querySelectorAll('#viewcube button').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const v = btn.dataset.view;
+                if (v === 'fit') fitAll();
+                else if (viewMap[v]) setView(viewMap[v][0], viewMap[v][1]);
+            });
+        });
+
+        // --- Resize ---
+        window.addEventListener('resize', () => {
+            camera.aspect = innerWidth / innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(innerWidth, innerHeight);
+        });
+
+        // Render loop
+        function animate(now) {
+            requestAnimationFrame(animate);
+            tickAnim(now);
+            renderer.render(scene, camera);
+        }
+        animate(performance.now());
+    })();
+    </script>
+</body>
+</html>

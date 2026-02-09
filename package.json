@@ -1,0 +1,16 @@
+{
+  "name": "cst-web-viewer",
+  "version": "0.1.0",
+  "description": "Three.js-based web 3D viewer for IFC/BIM models with Tekla-style controls",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": ["ifc", "bim", "3d-viewer", "threejs", "web-viewer", "cad"],
+  "author": "문찬웅 <developer.woong@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/coldwoong-moon/cst-web-viewer.git"
+  }
+}

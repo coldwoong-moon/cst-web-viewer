@@ -1,0 +1,4 @@
+node_modules/
+*.bin
+*.ifc
+.DS_Store
