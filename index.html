@@ -8,6 +8,51 @@
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { overflow: hidden; font-family: 'Segoe UI', sans-serif; background: #1a1a2e; }
         #container { width: 100vw; height: 100vh; }
+        #container canvas { cursor: default; }
+        #container canvas.orbiting { cursor: grabbing; }
+        #container canvas.panning { cursor: move; }
+
+        /* Upload Zone */
+        #upload-zone {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            display: flex; align-items: center; justify-content: center;
+            z-index: 1000;
+        }
+        #upload-zone.hidden { display: none; }
+        #upload-zone.dragover {
+            background: linear-gradient(135deg, #1a3a4e 0%, #16335e 100%);
+        }
+        .upload-content {
+            text-align: center; color: #fff; max-width: 500px;
+        }
+        .upload-icon {
+            font-size: 80px; margin-bottom: 20px;
+            filter: drop-shadow(0 4px 8px rgba(79,195,247,0.3));
+        }
+        .upload-content h2 {
+            font-size: 24px; margin-bottom: 10px; color: #4fc3f7;
+        }
+        .upload-content p {
+            color: #aaa; margin-bottom: 30px; font-size: 14px;
+        }
+        #browse-btn, #new-file-btn {
+            background: linear-gradient(135deg, #4fc3f7 0%, #2196f3 100%);
+            color: #fff; border: none; padding: 14px 32px;
+            font-size: 16px; border-radius: 8px; cursor: pointer;
+            transition: all 0.3s; box-shadow: 0 4px 12px rgba(79,195,247,0.3);
+        }
+        #browse-btn:hover, #new-file-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(79,195,247,0.5);
+        }
+        #new-file-btn {
+            padding: 8px 16px; font-size: 13px;
+            position: absolute; top: 10px; right: 150px;
+            z-index: 10;
+        }
+
+        /* Info Panel */
         #info {
             position: absolute; top: 10px; left: 10px;
             background: rgba(0,0,0,0.8); color: #fff;
@@ -18,10 +63,12 @@
         #info h3 { margin-bottom: 8px; color: #4fc3f7; font-size: 15px; }
         #info .stat { margin: 4px 0; color: #aaa; }
         #info .stat b { color: #fff; }
+
+        /* Progress */
         #progress {
             position: absolute; top: 50%; left: 50%;
             transform: translate(-50%, -50%);
-            text-align: center; color: #fff;
+            text-align: center; color: #fff; z-index: 100;
         }
         #progress .spinner {
             width: 50px; height: 50px; margin: 0 auto 15px;
@@ -38,6 +85,8 @@
             width: 0%; height: 100%; background: #4fc3f7;
             border-radius: 3px; transition: width 0.3s;
         }
+
+        /* Controls */
         #controls {
             position: absolute; bottom: 10px; left: 50%;
             transform: translateX(-50%);
@@ -52,6 +101,8 @@
             padding: 1px 5px; border-radius: 3px; font-family: monospace;
             font-size: 10px; border: 1px solid rgba(255,255,255,0.2);
         }
+
+        /* ViewCube */
         #viewcube {
             position: absolute; top: 10px; right: 10px;
             display: grid; grid-template-columns: repeat(4,36px);
@@ -66,6 +117,18 @@
     </style>
 </head>
 <body>
+    <div id="upload-zone" class="hidden">
+        <div class="upload-content">
+            <div class="upload-icon">📁</div>
+            <h2>IFC 파일을 드래그하거나 선택하세요</h2>
+            <p>지원 형식: .ifc (최대 2GB)</p>
+            <input type="file" id="file-input" accept=".ifc" style="display:none">
+            <button id="browse-btn">파일 선택</button>
+        </div>
+    </div>
+
+    <button id="new-file-btn" style="display:none">새 파일 열기</button>
+
     <div id="container"></div>
     <div id="progress">
         <div class="spinner"></div>
@@ -101,12 +164,122 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script>
     (async function() {
+        const uploadZone = document.getElementById('upload-zone');
+        const fileInput = document.getElementById('file-input');
+        const browseBtn = document.getElementById('browse-btn');
+        const newFileBtn = document.getElementById('new-file-btn');
         const status = document.getElementById('status');
         const fill = document.getElementById('fill');
+        const progressDiv = document.getElementById('progress');
+
+        // File upload handlers
+        async function uploadFile(file) {
+            if (!file || !file.name.toLowerCase().endsWith('.ifc')) {
+                alert('Please select a valid IFC file');
+                return;
+            }
+
+            uploadZone.classList.add('hidden');
+            progressDiv.style.display = 'block';
+            status.textContent = `Uploading ${file.name}...`;
+            fill.style.width = '0%';
+
+            try {
+                const response = await fetch('/api/upload', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/octet-stream',
+                        'X-Filename': file.name
+                    },
+                    body: file
+                });
+
+                const result = await response.json();
+                if (result.success) {
+                    status.textContent = 'Processing IFC file...';
+                    fill.style.width = '50%';
+                    // Poll for conversion status
+                    await pollConversionStatus();
+                    // Reload to show new mesh
+                    location.reload();
+                } else {
+                    throw new Error(result.error || 'Upload failed');
+                }
+            } catch (err) {
+                alert('Upload failed: ' + err.message);
+                uploadZone.classList.remove('hidden');
+                progressDiv.style.display = 'none';
+            }
+        }
+
+        async function pollConversionStatus() {
+            for (let i = 0; i < 600; i++) {
+                try {
+                    const res = await fetch('/api/status');
+                    const data = await res.json();
+                    if (data.state === 'done') return;
+                    if (data.state === 'error') throw new Error(data.error || 'Conversion failed');
+                    status.textContent = `Processing IFC file... (${i}s)`;
+                    fill.style.width = Math.min(95, 50 + i * 0.5) + '%';
+                } catch(e) {
+                    if (e.message && e.message !== 'Conversion failed') throw e;
+                    throw e;
+                }
+                await new Promise(r => setTimeout(r, 1000));
+            }
+            throw new Error('Conversion timed out (10 minutes)');
+        }
+
+        // Drag and drop
+        uploadZone.addEventListener('dragover', e => {
+            e.preventDefault();
+            uploadZone.classList.add('dragover');
+        });
+        uploadZone.addEventListener('dragleave', () => {
+            uploadZone.classList.remove('dragover');
+        });
+        uploadZone.addEventListener('drop', e => {
+            e.preventDefault();
+            uploadZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length > 0) {
+                uploadFile(e.dataTransfer.files[0]);
+            }
+        });
+
+        // Browse button
+        browseBtn.addEventListener('click', () => fileInput.click());
+        fileInput.addEventListener('change', e => {
+            if (e.target.files.length > 0) {
+                uploadFile(e.target.files[0]);
+            }
+        });
+
+        // New file button
+        newFileBtn.addEventListener('click', () => {
+            uploadZone.classList.remove('hidden');
+        });
+
+        // Check if mesh exists
+        let meshExists = false;
+        try {
+            const infoRes = await fetch('/api/info');
+            const infoData = await infoRes.json();
+            meshExists = infoData.fileSize > 0;
+        } catch(e) {
+            // If no mesh, show upload zone
+        }
+
+        if (!meshExists) {
+            uploadZone.classList.remove('hidden');
+            progressDiv.style.display = 'none';
+            return; // Stop here, wait for file upload
+        }
+
+        // Mesh exists, proceed with loading
+        newFileBtn.style.display = 'block';
 
         // Fetch binary mesh data with progress
         status.textContent = 'Downloading mesh data...';
-        // Get raw size for progress (gzip removes Content-Length)
         let expectedSize = 0;
         try {
             const info = await fetch('/api/info');
@@ -372,10 +545,9 @@
         scene.add(grid);
         scene.add(new THREE.AxesHelper(maxDim * 0.3));
 
-        // === Tekla Structures-style Navigation ===
-        // MMB: orbit | Shift+MMB or RMB: pan | Scroll: zoom to cursor
-        // Ctrl+MMB: zoom drag | Double-click: fit all
-        // Touch: 1-finger orbit, 2-finger pan/pinch zoom
+        // === Professional 3D Navigation with Inertia ===
+        // MMB only: orbit | Shift+MMB or RMB: pan | Scroll: zoom to cursor
+        // Inertia on orbit and pan for smooth feel
 
         const el = renderer.domElement;
         let activeBtn = -1;
@@ -383,6 +555,12 @@
         let lastMmbTime = 0;
         const initTheta = theta, initPhi = phi, initRadius = radius;
         const homeCenter = center.clone();
+
+        // Inertia for orbit and pan
+        let orbitVelocity = { x: 0, y: 0 };
+        let panVelocity = { x: 0, y: 0 };
+        const ORBIT_DAMPING = 0.92; // 8% decay per frame
+        const PAN_DAMPING = 0.90;   // 10% decay per frame
 
         // --- Smooth animation ---
         let animTarget = null;
@@ -424,6 +602,9 @@
         // --- Mouse controls ---
         el.addEventListener('mousedown', e => {
             animTarget = null; // cancel animation on interaction
+            orbitVelocity = { x: 0, y: 0 }; // stop inertia
+            panVelocity = { x: 0, y: 0 };
+
             if (e.button === 1) { // MMB
                 e.preventDefault();
                 const now = Date.now();
@@ -440,42 +621,75 @@
             prev = { x: e.clientX, y: e.clientY };
             if (dx === 0 && dy === 0) return;
 
-            const isOrbit = (activeBtn === 1 && !e.shiftKey && !e.ctrlKey) ||
-                            (activeBtn === 0 && !e.shiftKey && !e.ctrlKey);
+            // CRITICAL FIX: Only MMB for orbit, remove LMB orbit
+            const isOrbit = (activeBtn === 1 && !e.shiftKey && !e.ctrlKey);
             const isPan   = (activeBtn === 1 && e.shiftKey) || (activeBtn === 2);
             const isZoom  = (activeBtn === 1 && e.ctrlKey);
 
-            if (isOrbit && activeBtn === 1) {
-                // MMB orbit (Tekla primary)
-                theta -= dx * 0.004;
-                phi = Math.max(0.05, Math.min(Math.PI - 0.05, phi + dy * 0.004));
+            if (isOrbit) {
+                // MMB orbit only
+                const sensitivity = 0.004;
+                orbitVelocity.x = dx * sensitivity;
+                orbitVelocity.y = dy * sensitivity;
+                theta -= orbitVelocity.x;
+                phi = Math.max(0.05, Math.min(Math.PI - 0.05, phi + orbitVelocity.y));
                 updateCamera();
+                el.classList.add('orbiting');
             } else if (isPan) {
                 const speed = radius * 0.0008;
+                panVelocity.x = -dx * speed;
+                panVelocity.y = dy * speed;
                 const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
                 const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
-                center.addScaledVector(right, -dx * speed);
-                center.addScaledVector(up, dy * speed);
+                center.addScaledVector(right, panVelocity.x);
+                center.addScaledVector(up, panVelocity.y);
                 updateCamera();
+                el.classList.add('panning');
             } else if (isZoom) {
                 radius *= 1.0 - dy * 0.004;
-                radius = Math.max(maxDim * 0.005, radius);
+                radius = Math.max(maxDim * 0.001, Math.min(maxDim * 100, radius));
                 updateCamera();
             }
         });
 
-        window.addEventListener('mouseup', () => { activeBtn = -1; });
+        window.addEventListener('mouseup', () => {
+            activeBtn = -1;
+            el.classList.remove('orbiting', 'panning');
+            // Velocity persists for inertia in animate loop
+        });
         el.addEventListener('auxclick', e => { if (e.button === 1) e.preventDefault(); });
         el.addEventListener('contextmenu', e => e.preventDefault());
 
-        // --- Scroll: zoom toward cursor ---
+        // --- IMPROVED SCROLL: Zoom to cursor with low sensitivity ---
         el.addEventListener('wheel', e => {
             e.preventDefault();
             animTarget = null;
-            const zoomIn = e.deltaY < 0;
-            const factor = zoomIn ? 0.88 : 1.12;
+
+            // Mouse position to NDC
+            const rect = el.getBoundingClientRect();
+            const mouseX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+            const mouseY = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+            // Ray from camera through mouse
+            const raycaster = new THREE.Raycaster();
+            raycaster.setFromCamera(new THREE.Vector2(mouseX, mouseY), camera);
+
+            // MUCH LOWER zoom sensitivity (~5% per tick, CAD standard)
+            const zoomSpeed = 0.05; // 5% per notch (was 12%!)
+            const delta = Math.sign(e.deltaY);
+            const factor = Math.pow(1 + zoomSpeed, -delta);
+
+            const zoomIn = delta < 0;
+
+            // Zoom to cursor: move center slightly toward cursor direction
+            if (zoomIn && radius > maxDim * 0.01) {
+                const cursorDir = raycaster.ray.direction.clone().normalize();
+                const moveAmount = radius * (1 - factor) * 0.3; // 30% of zoom distance
+                center.addScaledVector(cursorDir, moveAmount);
+            }
+
             radius *= factor;
-            radius = Math.max(maxDim * 0.005, Math.min(maxDim * 50, radius));
+            radius = Math.max(maxDim * 0.001, Math.min(maxDim * 100, radius));
             updateCamera();
         });
 
@@ -485,6 +699,8 @@
         el.addEventListener('touchstart', e => {
             e.preventDefault();
             animTarget = null;
+            orbitVelocity = { x: 0, y: 0 };
+            panVelocity = { x: 0, y: 0 };
             touches = Array.from(e.touches);
             if (touches.length === 2) {
                 const dx = touches[1].clientX - touches[0].clientX;
@@ -521,7 +737,7 @@
                 const newDist = Math.sqrt(dx*dx + dy*dy);
                 if (touchDist > 0) {
                     radius *= touchDist / newDist;
-                    radius = Math.max(maxDim * 0.005, Math.min(maxDim * 50, radius));
+                    radius = Math.max(maxDim * 0.001, Math.min(maxDim * 100, radius));
                 }
                 touchDist = newDist;
                 updateCamera();
@@ -571,10 +787,35 @@
             renderer.setSize(innerWidth, innerHeight);
         });
 
-        // Render loop
+        // Render loop with inertia
         function animate(now) {
             requestAnimationFrame(animate);
             tickAnim(now);
+
+            // Apply inertia when not actively dragging
+            if (activeBtn < 0) {
+                const orbitActive = Math.abs(orbitVelocity.x) > 0.0001 || Math.abs(orbitVelocity.y) > 0.0001;
+                const panActive = Math.abs(panVelocity.x) > 0.0001 || Math.abs(panVelocity.y) > 0.0001;
+
+                if (orbitActive) {
+                    theta -= orbitVelocity.x;
+                    phi = Math.max(0.05, Math.min(Math.PI - 0.05, phi + orbitVelocity.y));
+                    orbitVelocity.x *= ORBIT_DAMPING;
+                    orbitVelocity.y *= ORBIT_DAMPING;
+                    updateCamera();
+                }
+
+                if (panActive) {
+                    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
+                    const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
+                    center.addScaledVector(right, panVelocity.x);
+                    center.addScaledVector(up, panVelocity.y);
+                    panVelocity.x *= PAN_DAMPING;
+                    panVelocity.y *= PAN_DAMPING;
+                    updateCamera();
+                }
+            }
+
             renderer.render(scene, camera);
         }
         animate(performance.now());
